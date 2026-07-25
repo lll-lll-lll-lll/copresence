@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege by default: no job gets a token scope it did not ask for.
+# A workflow that only builds and tests never needs write access to anything.
+permissions: {}
+
+# A superseded run on the same ref is wasted compute and a confusing signal.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both platforms matter: SQLite WAL behaviour depends on the
+        # filesystem's locking, and this is a multi-process design.
+        #
+        # Pinned, not "-latest". Those labels are moved to a new OS image on
+        # GitHub's schedule, which turns an unrelated push into the first run on
+        # a different kernel and libc — a bad way to discover a portability bug
+        # in locking behaviour. Bump these deliberately; Dependabot updates
+        # actions, not runner labels, so this is a manual line to revisit.
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      # Every action is pinned to a commit SHA, not a tag. A tag is mutable —
+      # whoever controls the action's repository can repoint v7 at new code that
+      # runs with this workflow's token. Dependabot keeps the pins current
+      # (.github/dependabot.yml); pinning without that just freezes known bugs.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Do not leave the token in .git/config where any later step — or a
+          # compromised dependency invoked by one — could read and reuse it.
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # Track go.mod rather than a hardcoded version, so the toolchain the
+          # module declares is the one CI proves against.
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::not gofmt'd:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # -race is the point of this job, not a nicety. The single bet the
+      # daemonless design makes is that concurrent processes stay consistent on
+      # one shared SQLite file, and internal/store/concurrent_test.go is what
+      # holds that claim up. A silent regression there loses events.
+      - name: Test
+        run: go test -race -count=1 ./...
+
+      - name: Build
+        run: go build ./...
+
+  vulncheck:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # govulncheck reports only vulnerabilities on a call path this code
+      # actually reaches, so it does not drown the signal in advisories for
+      # dependency code we never execute. Runs on any repository — unlike
+      # CodeQL and dependency review, it needs no Advanced Security licence.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

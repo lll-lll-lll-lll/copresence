@@ -1,0 +1,28 @@
+version: 2
+
+# Pinning actions to commit SHAs (see workflows/ci.yml) only improves security
+# if something updates those pins. Without this file, pinning trades "a tag
+# could be repointed at malicious code" for "we are frozen on a version with a
+# known vulnerability" — which is usually the worse of the two.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # One PR for the whole set: this module has few direct dependencies, and
+      # a batched bump is easier to review than six near-identical PRs.
+      go:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps"
