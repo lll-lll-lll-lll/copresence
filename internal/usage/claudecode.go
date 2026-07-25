@@ -23,6 +23,7 @@ type claudeLine struct {
 	SessionID   string `json:"sessionId"`
 	Timestamp   string `json:"timestamp"`
 	IsSidechain bool   `json:"isSidechain"`
+	CWD         string `json:"cwd"`
 	Message     struct {
 		ID    string `json:"id"`
 		Model string `json:"model"`
@@ -82,6 +83,7 @@ func ParseClaudeCode(r io.Reader, actor string) ([]Record, error) {
 			ExternalID:      l.Message.ID,
 			Model:           l.Message.Model,
 			Speed:           u.Speed,
+			CWD:             l.CWD,
 			Subagent:        l.IsSidechain,
 			InputTokens:     u.InputTokens,
 			OutputTokens:    u.OutputTokens,

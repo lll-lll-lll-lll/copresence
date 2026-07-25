@@ -124,6 +124,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, usageSchema); err != nil {
 		return err
 	}
+	if err := s.migrateUsage(ctx); err != nil {
+		return err
+	}
 	return s.migrateTokenizer(ctx)
 }
 

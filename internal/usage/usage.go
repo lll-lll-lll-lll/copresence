@@ -16,6 +16,11 @@ type Record struct {
 
 	Model string `json:"model"`
 	Speed string `json:"speed,omitempty"`
+	// CWD is the directory the agent was working in. It is the only unit of
+	// work available for free: the agent does not have to declare it, it is a
+	// byproduct of doing the work at all. Signals that must be declared — a
+	// status, an explicit work marker — are the ones that go unposted.
+	CWD string `json:"cwd,omitempty"`
 	// Subagent marks work done by a delegated agent rather than the main loop.
 	// Kept as a dimension because "how much are subagents costing me" is the
 	// first question anyone asks of this data.

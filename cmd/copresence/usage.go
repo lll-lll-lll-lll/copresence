@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lll-lll-lll-lll/copresence/internal/store"
 	"github.com/lll-lll-lll-lll/copresence/internal/usage"
 )
 
@@ -18,7 +19,12 @@ const usageHelp = `copresence usage — token and cost accounting
   usage [report]           show spend by actor, model, and scope
   usage records            raw rows as JSON, newest first (dashboard feed)
 
-Flags: --by actor|model|day|scope  --since 7d  --json  --limit N
+Flags: --by actor|model|day|scope|project  --since 7d  --json  --limit N
+       --all-projects  include work done outside this workspace
+
+Reports cover this workspace only. Transcripts are keyed by the directory a
+session started in, so one opened in a parent directory also carries sibling
+projects' spend; --all-projects shows it, --by project breaks it down.
 `
 
 func cmdUsage(args []string) error {
@@ -67,7 +73,7 @@ func cmdUsageImport(args []string) error {
 		}
 	}
 
-	totalNew, totalSeen := 0, 0
+	totalNew, totalSeen, totalFilled := 0, 0, 0
 	var unpriced []string
 	for _, p := range paths {
 		recs, err := usage.ParseClaudeCodeFile(p, c.actor)
@@ -75,7 +81,7 @@ func cmdUsageImport(args []string) error {
 			fmt.Fprintf(os.Stderr, "skipping %s: %v\n", p, err)
 			continue
 		}
-		n, err := st.RecordUsage(ctx, c.session, recs)
+		w, err := st.RecordUsage(ctx, c.session, recs)
 		if err != nil {
 			return err
 		}
@@ -84,11 +90,20 @@ func cmdUsageImport(args []string) error {
 				unpriced = append(unpriced, r.Model)
 			}
 		}
-		totalNew += n
+		totalNew += w.Inserted
+		totalFilled += w.Backfilled
 		totalSeen += len(recs)
-		fmt.Printf("%-60s %4d calls, %d new\n", trimPath(p), len(recs), n)
+		note := ""
+		if w.Backfilled > 0 {
+			note = fmt.Sprintf(", %d backfilled", w.Backfilled)
+		}
+		fmt.Printf("%-58s %4d calls, %d new%s\n", trimPath(p), len(recs), w.Inserted, note)
 	}
-	fmt.Printf("\n%d model calls seen, %d newly recorded\n", totalSeen, totalNew)
+	fmt.Printf("\n%d model calls seen, %d newly recorded", totalSeen, totalNew)
+	if totalFilled > 0 {
+		fmt.Printf(", %d existing rows backfilled", totalFilled)
+	}
+	fmt.Println()
 
 	// Unpriced models are reported loudly: a dashboard total that silently
 	// omits an unknown model is worse than no total.
@@ -102,13 +117,14 @@ func cmdUsageImport(args []string) error {
 func cmdUsageReport(args []string) error {
 	fs := flag.NewFlagSet("usage", flag.ExitOnError)
 	c := bind(fs, false)
-	by := fs.String("by", "", "aggregate by actor, model, day, or scope (default: all four)")
+	by := fs.String("by", "", "aggregate by actor, model, day, scope, or project")
 	sinceFlag := fs.String("since", "", "only usage after this window, e.g. 24h or 7d")
 	asJSON := fs.Bool("json", false, "emit JSON")
+	all := fs.Bool("all-projects", false, "include work done outside this workspace")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	since, err := parseSince(*sinceFlag)
+	filter, root, err := c.usageFilter(*sinceFlag, *all)
 	if err != nil {
 		return err
 	}
@@ -125,13 +141,13 @@ func cmdUsageReport(args []string) error {
 	}
 
 	out := map[string]any{}
-	total, err := st.UsageTotal(ctx, c.session, since)
+	total, err := st.UsageTotal(ctx, c.session, filter)
 	if err != nil {
 		return err
 	}
 	out["total"] = total
 	for _, d := range dims {
-		rows, err := st.UsageBy(ctx, c.session, d, since)
+		rows, err := st.UsageBy(ctx, c.session, d, filter)
 		if err != nil {
 			return err
 		}
@@ -149,8 +165,13 @@ func cmdUsageReport(args []string) error {
 		return nil
 	}
 	fmt.Printf("session %q", c.session)
-	if !since.IsZero() {
-		fmt.Printf(" since %s", since.Local().Format("2006-01-02 15:04"))
+	if filter.CWDPrefix != "" {
+		fmt.Printf(" in %s", trimPath(root))
+	} else {
+		fmt.Printf(" across all projects")
+	}
+	if !filter.Since.IsZero() {
+		fmt.Printf(" since %s", filter.Since.Local().Format("2006-01-02 15:04"))
 	}
 	fmt.Printf("\n  %d calls   $%.2f   %s tokens\n",
 		total.Calls, total.CostUSD, humanTokens(total.InputTokens+total.OutputTokens+
@@ -164,9 +185,9 @@ func cmdUsageReport(args []string) error {
 			continue
 		}
 		fmt.Printf("\nby %s\n", d)
-		fmt.Printf("  %-24s %6s %10s %10s %10s %9s\n", "", "calls", "in", "out", "cache", "cost")
+		fmt.Printf("  %-28s %6s %10s %10s %10s %9s\n", "", "calls", "in", "out", "cache", "cost")
 		for _, r := range rows {
-			fmt.Printf("  %-24s %6d %10s %10s %10s %9s\n", truncate(r.Key, 24), r.Calls,
+			fmt.Printf("  %-28s %6d %10s %10s %10s %9s\n", shortKey(r.Key, 28), r.Calls,
 				humanTokens(r.InputTokens), humanTokens(r.OutputTokens),
 				humanTokens(r.CacheReadTokens+r.CacheWriteToken), fmt.Sprintf("$%.2f", r.CostUSD))
 		}
@@ -179,10 +200,11 @@ func cmdUsageRecords(args []string) error {
 	c := bind(fs, false)
 	sinceFlag := fs.String("since", "", "only usage after this window, e.g. 24h or 7d")
 	limit := fs.Int("limit", 1000, "max rows")
+	all := fs.Bool("all-projects", false, "include work done outside this workspace")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	since, err := parseSince(*sinceFlag)
+	filter, _, err := c.usageFilter(*sinceFlag, *all)
 	if err != nil {
 		return err
 	}
@@ -191,13 +213,32 @@ func cmdUsageRecords(args []string) error {
 		return err
 	}
 	defer st.Close()
-	recs, err := st.UsageRecords(context.Background(), c.session, since, *limit)
+	recs, err := st.UsageRecords(context.Background(), c.session, filter, *limit)
 	if err != nil {
 		return err
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(recs)
+}
+
+// usageFilter builds the query filter. Reports scope to the workspace by
+// default: a transcript directory can span sibling projects, and a total that
+// silently includes unrelated work is worse than one that says what it covers.
+func (c *common) usageFilter(sinceFlag string, allProjects bool) (store.Filter, string, error) {
+	since, err := parseSince(sinceFlag)
+	if err != nil {
+		return store.Filter{}, "", err
+	}
+	root, err := findRoot(c.dir)
+	if err != nil {
+		return store.Filter{}, "", err
+	}
+	f := store.Filter{Since: since}
+	if !allProjects {
+		f.CWDPrefix = root
+	}
+	return f, root, nil
 }
 
 // parseSince accepts a Go duration plus a "d" suffix for days, which is what
@@ -231,11 +272,20 @@ func humanTokens(n int64) string {
 	}
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
+// shortKey fits a grouping key into n columns. Paths are elided from the left:
+// the tail is what distinguishes /Users/me/dev/copresence from
+// /Users/me/dev/atcoder, so truncating from the right hides exactly the part
+// the reader needs.
+func shortKey(s string, n int) string {
+	s = trimPath(s)
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n-1] + "…"
+	if strings.ContainsRune(s, '/') {
+		return "…" + string(r[len(r)-(n-1):])
+	}
+	return string(r[:n-1]) + "…"
 }
 
 func trimPath(p string) string {
