@@ -1,109 +1,120 @@
-# copresence — shared session substrate for AI agents
+# copresence — a shared session substrate for AI agents
 
-> 「同じ場に居合わせている」= co-presence。エージェントは互いに指示を送らず、
-> 同じ場を共有する。命名の経緯と既存プロダクトとの差分は §13。
+English | [日本語](DESIGN.ja.md)
 
-## 1. 何を解くか
+> Co-presence: being in the same place at the same time. Agents do not send each
+> other instructions; they share a place. The naming history and how this
+> differs from adjacent products are in §13.
 
-現状の multi-agent は **A が B に prompt を渡す**構造。
+## 1. What this solves
 
-- B はコールドスタート。A の文脈を要約して渡す = 不可逆な圧縮
-- B が途中で何を見たかは、終わるまで誰にも見えない
-- 「誰が何を根拠にどう決めたか」がどこにも残らない
+Today's multi-agent setups are built on **A handing a prompt to B**.
 
-copresence は **メッセージパッシングを共有世界状態への読み書きに置き換える**。
-系譜は blackboard アーキテクチャ + event sourcing。そこに「コンテキスト予算」を足したもの。
+- B starts cold. A's context is summarized into an instruction — a lossy,
+  one-way compression.
+- Whatever B saw along the way is invisible to everyone until B returns.
+- Who decided what, and on what evidence, is recorded nowhere.
 
-**指示は消える。** A が B に頼むのではなく、A は学んだことを書き、B は自分にとって
-新しいものを読む。誰も誰かの命令を受けない。
+copresence **replaces message passing with reading and writing a shared world
+state**. The lineage is the blackboard architecture plus event sourcing, with a
+context budget added on top.
 
-## 2. スコープ
+**Instructions disappear.** A does not ask B for anything: A writes what it
+learned, B reads what is new to it. Nobody takes orders from anybody.
 
-### v0 でやる
-- 同一マシン上の並列エージェント間の文脈共有
-- MCP server として公開 → MCP 対応ランタイムなら何でも参加可能
-- 構造化イベントの append-only log
-- 予算付きコンテキスト投影 (`catchup`)
+## 2. Scope
 
-### v0 でやらない
-- ファイル編集の調整 / ロック / worktree 管理 → 既存の git 運用に任せる
-- ネットワーク同期・チーム共有・認可 → v1 以降
-- LLM による自動要約 → 決定的な投影で押し切る (§6)
-- 自動キャプチャ（hooks で全 tool call を記録）→ ノイズ源。明示 post が基本
+### In scope for v0
+- Context sharing between agents running concurrently on one machine
+- Exposed as an MCP server, so any MCP-capable runtime can join
+- An append-only log of structured events
+- A budgeted context projection (`catchup`)
 
-## 3. アーキテクチャ
+### Out of scope for v0
+- Edit coordination, locking, worktree management — left to existing git practice
+- Network sync, team sharing, authorization — v1 or later
+- LLM summarization — the projection stays deterministic (§6)
+- Auto-capture (recording every tool call via hooks) — a noise source; explicit
+  posting is the model
+
+## 3. Architecture
 
 ```
  Agent A (Claude Code)   Agent B (Cursor)   Agent C (Codex)
         │                      │                  │
-   MCP server            MCP server         MCP server     ← 各プロセスに1つ
+   MCP server            MCP server         MCP server     ← one per process
         └──────────────────────┼──────────────────┘
                                │
                   .copresence/session.db (SQLite WAL)
 ```
 
-**デーモンレス。** SQLite WAL がマルチプロセス並行を捌くので、常駐プロセスを持たない。
-ライフサイクル管理も orphan process もソケットパスもゼロ。通知は `catchup` のプル型で足りる
-（同一マシンの人間ペースの並行性なら、ポーリングすら要らない）。
+**No daemon.** SQLite in WAL mode handles multi-process concurrency, so there is
+no resident process — no lifecycle to manage, no orphans, no socket paths. A
+pull-based `catchup` is enough for notification; at one machine's human-paced
+concurrency, even polling is unnecessary.
 
-`busy_timeout` は長めに取る。複数プロセスが同時に書くので、SQLITE_BUSY を
-モデルに見せるより短時間ブロックするほうがまし。
+`busy_timeout` is generous. Several processes write at once, and blocking
+briefly beats surfacing `SQLITE_BUSY` to a model that has no idea what to do
+with it.
 
-配置は workspace root の `.copresence/`。中に `.gitignore` (`*` + `!.gitignore`) を置いて
-**自分自身を無視させる**ので、ユーザーのリポジトリの .gitignore を汚さない。
+State lives in `.copresence/` at the workspace root, containing a `.gitignore`
+of `*` plus `!.gitignore` so the directory **ignores itself** — running `init`
+never dirties the user's own `.gitignore`.
 
-## 4. データモデル
+## 4. Data model
 
 ```sql
 CREATE TABLE events (
-  seq        INTEGER PRIMARY KEY AUTOINCREMENT,  -- 全順序（SQLite が採番）
-  session    TEXT    NOT NULL,                   -- 既定 'main'
+  seq        INTEGER PRIMARY KEY AUTOINCREMENT,  -- total order, assigned by SQLite
+  session    TEXT    NOT NULL,                   -- 'main' by default
   ts         TEXT    NOT NULL,
   actor      TEXT    NOT NULL,
   type       TEXT    NOT NULL,
-  subject    TEXT    NOT NULL DEFAULT '',        -- 'src/auth/jwt.go:88' 等
+  subject    TEXT    NOT NULL DEFAULT '',        -- e.g. 'src/auth/jwt.go:88'
   body       TEXT    NOT NULL,
   refs       TEXT    NOT NULL DEFAULT '[]',      -- JSON ["kind:value", ...]
   tags       TEXT    NOT NULL DEFAULT '[]',
   supersedes INTEGER REFERENCES events(seq),
   est_tokens INTEGER NOT NULL
 );
--- + participants, watermarks, events_fts (FTS5 external content)
+-- plus participants, watermarks, events_fts (FTS5 external content)
 ```
 
-`refs` は `"event:142"` / `"file:src/auth/jwt.go"` / `"url:..."` のような
-**"kind:value" 文字列**。構造体にせず文字列にしたのは、エージェントが引数として
-書きやすいから。解釈するのは `event:`（question ↔ answer の紐付け）と
-`file:`（`session_context` の逆引き）だけで、それ以外は素通し。
+`refs` holds **"kind:value" strings** such as `"event:142"`,
+`"file:src/auth/jwt.go"`, or `"url:..."`. Strings rather than structs because an
+agent has to write them as a tool argument. Only two kinds are interpreted:
+`event:` (linking an answer to its question) and `file:` (the reverse lookup
+behind `session_context`). Everything else passes through untouched.
 
-### イベント型（意図的に少なく保つ）
+### Event types (deliberately few)
 
-| type | 意味 | priority | half-life |
+| type | meaning | priority | half-life |
 |---|---|---|---|
-| `decision` | 選択とその理由。却下案も書く | 10 | 72h |
-| `question` | 未解決の穴。answer が付くまで残る | 9 | 72h |
-| `finding` | 事実の発見。`subject` に場所 | 7 | 72h |
-| `answer` | `refs` で question を指し、閉じる | 6 | 72h |
-| `artifact` | 生成物へのポインタ | 5 | 72h |
-| `task` | やること宣言 | 4 | 72h |
-| `status` | いま何をしているか | 3 | **30m** |
-| `note` | それ以外 | 2 | 12h |
+| `decision` | a choice and why, including what was rejected | 10 | 72h |
+| `question` | an unresolved gap; stays open until answered | 9 | 72h |
+| `finding` | an observed fact; `subject` carries the location | 7 | 72h |
+| `answer` | refs a question and closes it | 6 | 72h |
+| `artifact` | a pointer to something produced | 5 | 72h |
+| `task` | a declaration of work to be done | 4 | 72h |
+| `status` | what you are doing right now | 3 | **30m** |
+| `note` | everything else | 2 | 12h |
 
-**priority の根拠は「再導出できなさ」。** finding はコードを読み直せば再発見できるが、
-ある案を却下した理由は、その判断をしたセッションが終わると二度と手に入らない。
-だから decision が最上位。
+**Priority tracks how un-rederivable something is.** A finding can be
+rediscovered by reading the code again; the reason a path was rejected is gone
+the moment the session that decided it ends. Hence decision at the top.
 
-**status だけ半減期が桁違いに短い。** 3時間前の「いま何をしている」は、
-既に動いた世界を記述していて、無いより悪い。
+**Only status decays on a radically shorter half-life.** A three-hour-old "what
+I'm doing now" describes a world that has already moved on — worse than nothing.
 
-**`supersedes`** で訂正する。誤った finding が永久に残る問題を、上書きイベントで解決する。
-これは全読み取り経路（unread / search / context / digest / export）に一括で効く。
+**`supersedes`** is how corrections work. A wrong finding would otherwise haunt
+the session forever; a superseding event retires it across every read path at
+once (unread / search / context / digest / export).
 
-## 5. MCP サーフェス
+## 5. MCP surface
 
 ```
 session_post(type, body, subject?, refs?, tags?, supersedes?)
-session_catchup(budget_tokens?, focus?)     ★中核
+session_catchup(budget_tokens?, focus?)     ★ the core
 session_search(query?, type?, subject?, limit?)
 session_context(subject, limit?)
 
@@ -111,77 +122,85 @@ resource: session://digest
 prompt:   join
 ```
 
-4 tool。これ以上増やさない。ツールが多いとモデルの注意を奪い合い、
-**呼ばれない協調ツールは無いより悪い**。
+Four tools, and no more. More tools compete for the model's attention, and
+**a coordination tool that never gets called is worse than none**.
 
-`actor` は tool 引数ではなく **MCP server プロセスが保持する**。参加者が他人になりすませない。
+`actor` is held by the **MCP server process**, not taken from a tool argument,
+so a participant cannot post as someone else.
 
-## 6. Assembler — この OSS の本体
+## 6. The assembler — the actual product
 
 `catchup(budget_tokens, focus?)`:
 
-0. **先に head (`MaxSeq`) を読む。** 以降の読み取りは全て `seq <= head` で束縛する。
-   これを怠ると、組み立て中に他プロセスが書いたイベントが「配信されないまま既読」になる（§11）
-1. watermark 超・head 以下の未読を取得（**自分のイベントは除外** — 既に知っている）
-2. superseded を除外
-3. **固定枠**（予算の 30% 上限）を先に確保
-   - **未解決の question 全部**（古い順）— 落とすと全員が同じ穴を再発見する
-   - **他参加者の最新 status 各1件**（2時間以内）— 作業衝突の検知器
-4. 残りを `型 priority × 時間減衰 × focus ブースト` でスコアリングして貪欲詰め
-   - **入らなければ止めずにスキップ**。巨大な decision の後ろにある小さな finding が
-     ちゃんと入る（実質的に密度ベースの詰め方になる）
-5. あふれた分は型ごとに件数と **seq** を畳んで示す → `note×28 (#5-#32)`。
-   seq を出さないと「search で回収できる」が建前になる（検索する手がかりがない）
-6. watermark を更新（**投影が成功した後にだけ**進める）。ただし1ページ（500件）を
-   超えるバックログでは、**配信できた最後の seq までしか進めない** — head まで進めると
-   残りが「見ないまま既読」になる
+0. **Read the head (`MaxSeq`) first**, and bound every subsequent read by
+   `seq <= head`. Skip this and an event written by another process mid-assembly
+   becomes "marked read but never delivered" (§11).
+1. Fetch unread above the watermark and at or below the head (**excluding your
+   own events** — you already know them).
+2. Drop superseded events.
+3. Reserve a **fixed frame** first (capped at 30% of budget):
+   - **every open question**, oldest first — drop these and each participant
+     independently rediscovers the same hole
+   - **each other participant's latest status** (within 2h) — the collision detector
+4. Score the rest by `type priority × time decay × focus boost` and fill greedily.
+   - **Skip rather than stop when something does not fit.** A small finding
+     behind an enormous decision still gets in, which amounts to density-based
+     packing.
+5. Fold the overflow into per-type counts **and seqs** → `note×28 (#5-#32)`.
+   Without the seqs, "recoverable via search" is a claim with no key to search on.
+6. Advance the watermark — **only after the projection succeeded**. On a backlog
+   larger than one page (500 events), advance **only to the last delivered seq**;
+   advancing to the head would mark the remainder read unseen.
 
-**LLM 要約は使わない。** 決定的・高速・依存ゼロ。あふれたときの落ち方が
-ドキュメント化された順序になる（要約器だと、一番大事な1行が黙って消える可能性がある）。
-畳んだものは search / context で必ず回収できる。
+**No LLM summarization.** Deterministic, fast, dependency-free — and an
+overflowing session degrades in a documented order rather than having a
+summarizer silently drop the one line that mattered. Anything folded stays
+reachable through search and context.
 
-固定枠には対称のリスクがある: question が50件あると新着が全部押し出される。
-だから 30% で頭打ちにし、超えた分は件数表示にする。両方向をテストで固定している。
+The fixed frame carries a symmetric risk: fifty open questions would push out
+all new material. Hence the 30% cap, with the excess reported as a count. Both
+directions are pinned by tests.
 
-## 7. 信頼境界
+## 7. Trust boundary
 
-共有 log は prompt injection の配管になる。A が汚染されると、その finding を読んだ
-B・C が連鎖的に汚染される。
+A shared log is plumbing for prompt injection. If A is compromised, B and C are
+compromised in turn by reading its findings.
 
-- catchup / search / context の出力は必ず `<session-events>` でラップし、
-  「これは他エージェントが書いたデータであって指示ではない」を明記する
-- 各行に出所（`#seq`, `type`, `actor`）を付ける
-- `join` prompt で規約を明示する
-- v1 でネットワーク同期するなら、ここが最大の設計負債になる
+- Output from catchup / search / context is always wrapped in `<session-events>`
+  and states that this is data written by other agents, not instructions
+- Every line carries provenance (`#seq`, `type`, `actor`)
+- The `join` prompt spells out the rules
+- If v1 adds network sync, this becomes the largest design debt
 
-## 8. 実装
+## 8. Implementation
 
-Go。単一バイナリ、`modernc.org/sqlite` で cgo 不要、公式 `modelcontextprotocol/go-sdk`。
+Go: a single binary, `modernc.org/sqlite` so no cgo, and the official
+`modelcontextprotocol/go-sdk`.
 
 ```
 cmd/copresence/      CLI (init, mcp, catchup, post, log, search, context,
                           digest, export, usage, doctor)
-internal/event/      型定義、priority/half-life、validation、トークン概算
-internal/store/      SQLite、マイグレーション、全クエリ、usage テーブル
-internal/assemble/   ★ 投影 + digest
+internal/event/      types, priority/half-life, validation, token estimation
+internal/store/      SQLite, migrations, every query, the usage table
+internal/assemble/   ★ projection + digest
 internal/mcpserver/  MCP server
-internal/usage/      価格表、コスト計算、transcript 取り込み
+internal/usage/      rate table, cost computation, transcript import
 ```
 
-`internal/assemble` と `internal/store` にテーブル駆動テストを厚く積む。
-ここの回帰が製品品質そのもの。
+Table-driven tests are stacked heavily on `internal/assemble` and
+`internal/store`. A regression there is a regression in the product itself.
 
-## 9. 使用量とコスト (usage)
+## 9. Usage and cost
 
-エージェントが**いくら使ったか**を記録する。ダッシュボード前提の設計。
+Records **what each agent spent**, designed for a dashboard to read.
 
-**イベントログには入れない。** これはテレメトリであって共有知識ではない。
-他のエージェントが読む必要はないし、log に入れると catchup の予算を
-誰も読まない行が食う。独立した `usage` テーブルに置く。
+**It does not go in the event log.** This is telemetry, not shared knowledge. No
+agent needs to read another's bill, and putting it in the log would spend
+catchup budget on rows nobody reads. It gets its own `usage` table.
 
 ```sql
 CREATE TABLE usage (
-  session, actor, ts, source, external_id,   -- (source, external_id) が UNIQUE
+  session, actor, ts, source, external_id,   -- (source, external_id) is UNIQUE
   model, speed, subagent,
   input_tokens, output_tokens, cache_read_tokens,
   cache_write_5m, cache_write_1h,
@@ -189,123 +208,131 @@ CREATE TABLE usage (
 );
 ```
 
-**単価はキャッシュ種別で3段階ある。** 入力を基準に read = 0.1倍、
-5分キャッシュ書き込み = 1.25倍、1時間キャッシュ書き込み = **2倍**。
-5m/1h を一緒くたにすると、キャッシュ主体のワークロードで書き込み分を6割過小評価する。
-Claude Code の transcript は `cache_creation.ephemeral_{5m,1h}_input_tokens` で
-分けて出しているので、そのまま使う。
+**Cache pricing has three tiers**, all relative to the input rate: read = 0.1×,
+5-minute cache write = 1.25×, 1-hour cache write = **2×**. Collapsing 5m and 1h
+understates the write line of a cache-heavy workload by 60%. A Claude Code
+transcript already splits them as
+`cache_creation.ephemeral_{5m,1h}_input_tokens`, so use that.
 
-**コストは import 時に計算して保存する。** 後で価格改定があっても過去の記録は動かない。
+**Cost is computed at import and stored.** A later price change does not move
+what history says.
 
-**イベントの時刻で価格を引く。** 導入価格（Sonnet 5 の $2/$10、2026-08-31まで）が
-あるため、古い transcript を再インポートしても当時の金額が再現される。
+**Rates are resolved against the event's own timestamp.** Introductory pricing
+exists (Sonnet 5 at $2/$10 through 2026-08-31), so re-importing an old
+transcript reproduces what it actually cost.
 
-**fast モードは model 名から判別できない。** `usage.speed == "fast"` で判定し、
-Opus 5 / 4.8 は $10/$50 を適用する。
+**Fast mode is not inferable from the model id.** It is detected via
+`usage.speed == "fast"`, where Opus 5 / 4.8 bill at $10/$50.
 
-**未知のモデルは $0 にせず `priced=false` で立てる。** 総額から黙って抜け落ちるより、
-ダッシュボードに「値付け不能」として出るほうがいい。
+**An unknown model is flagged `priced=false`, not silently $0.** Better for a
+dashboard to show "unpriced" than for a total to quietly omit it.
 
-### Claude Code transcript の取り込み
+### Importing Claude Code transcripts
 
-`~/.claude/projects/<slug>/*.jsonl` を読む。実測で分かった罠が2つ:
+Reads `~/.claude/projects/<slug>/*.jsonl`. Two traps found by measurement:
 
-1. **`uuid` で重複排除すると2.2倍に膨らむ。** 同一の assistant メッセージが
-   複数行に書き直されて出力され、各行が同じ最終 usage を持っている。
-   **`message.id` で排除する**のが正しい。
-2. **transcript はセッションの cwd でスラッグ化される（repo root ではない）。**
-   親ディレクトリで開いたセッションは親のスラッグに入る。祖先を遡って探し、
-   どのディレクトリを使ったかを報告する（兄弟プロジェクトが混ざりうるため）。
+1. **Deduplicating by `uuid` inflates the numbers 2.2×.** The same assistant
+   message is rewritten across several lines, each carrying the identical final
+   usage. **Deduplicate by `message.id`.**
+2. **Transcripts are slugified by the session's cwd, not the repo root.** A
+   session opened in a parent directory files under the parent's slug. The
+   importer walks up ancestors and reports which directory it used, since an
+   ancestor's transcripts can include sibling projects.
 
-`(source, external_id)` の UNIQUE 制約で import は冪等。transcript は伸び続けるので、
-同じファイルを何度も読むことになる。
+`UNIQUE(source, external_id)` makes import idempotent, which matters because
+transcripts grow and the same file is read repeatedly.
 
-### コマンド
+### Commands
 
 ```
-copresence usage import [FILE...]   # 取り込み（既定は自動探索）
+copresence usage import [FILE...]   # import (auto-discovers by default)
 copresence usage [--by day] [--since 7d] [--json]
-copresence usage records --limit N  # 生データ JSON（ダッシュボードのフィード）
+copresence usage records --limit N  # raw JSON — the dashboard feed
 ```
 
-## 10. 現状 (v0)
+## 10. Current state (v0)
 
-M0–M2 完了、レビュー指摘の修正済み。動いているもの:
+M0–M2 complete, review findings fixed. Working:
 
-- SQLite スキーマ + FTS5(trigram)、supersedes の全経路での除外、watermark（後退しない）
-- Assembler フル実装（固定枠・スコアリング・スキップ詰め・畳み込み・決定性・
-  並行書き込み下での取りこぼしゼロ）
-- MCP server: 4 tool + digest resource + join prompt。stdio で疎通確認済み
-- usage: 取り込み・集計・JSON フィード
-- CLI 11 コマンド
-- テスト: assembler 10、store 14、並行性 3、usage 9
+- SQLite schema + FTS5 (trigram), supersedes excluded on every read path,
+  monotonic watermarks
+- Assembler complete: fixed frame, scoring, skip-fill, folding, determinism, and
+  zero loss under concurrent writes
+- MCP server: 4 tools + digest resource + join prompt, verified over stdio
+- usage: import, aggregation, JSON feed
+- CLI: 11 commands
+- Tests: assembler 10, store 14, concurrency 3, usage 9
 
-## 11. 実装して分かったこと
+## 11. What implementation taught us
 
-**actor id の衝突が致命的。** 同じ `--as` で2プロセス起動すると、互いのイベントを
-「自分のもの」として除外し合い、共有が静かに壊れる。id 無指定時は
-プロセスごとに自動生成する方針にした。安定 id は「再起動をまたいで既読位置が残る」
-ためのオプトインという位置づけ。
+**Actor id collisions are fatal.** Two processes started with the same `--as`
+filter each other's events out as their own, and sharing breaks silently. Ids
+are now auto-generated per process when unspecified; a stable id is an opt-in
+for preserving your read position across restarts.
 
-**`answer` は ref 必須にした。** ref のない answer は、人間の目には解決済みに見えるのに
-question は開いたままになる。validation で弾く。
+**`answer` now requires a ref.** An answer with no ref looks resolved to a human
+while the question stays open forever. Validation rejects it.
 
-**Go の `flag` は本文の後ろのフラグを黙って本文に取り込む。** CLI で
-`post --as me "body" --tag x` が壊れるので、明示的にエラーにする。
+**Go's `flag` package silently swallows flags that follow the body.** The CLI's
+`post --as me "body" --tag x` broke, so it is now an explicit error.
 
-**別セッションのレビューで、デーモンレス設計の賭けが外れていた。**
-`Unread` と `MaxSeq` を別クエリで撃っていたため、その間に他プロセスが書いた
-イベントが「配信されないまま既読」になっていた。実測で300件中27件（9%）が消失、
-エラーなし。先に head を読んで `seq <= head` で束縛することで解決。
-**この一点だけで並行性テストを書く価値があった** — 既存テストは fake の
-`MaxSeq` が実 store と挙動が違ったため、構造的に検出できなかった。
+**A review by a separate session found that the daemonless bet was losing.**
+`Unread` and `MaxSeq` were separate queries, so events written by another
+process in between were "marked read but never delivered" — measured at 27 of
+300 lost (9%), silently. Fixed by reading the head first and bounding on
+`seq <= head`. **That one finding justified the concurrency tests on its own**:
+the existing suite could not detect it, because the fake's `MaxSeq` behaved
+differently from the real store.
 
-**「全読み取り経路に効く」と書いた supersedes が、1経路だけ効いていなかった。**
-answer 側にガードがなく、取り下げた answer が question を閉じたままにしていた。
-テストの検査マップから `OpenQuestions` が漏れていたのが原因。
+**The supersedes guard documented as "applies to every read path" missed one.**
+The answer side had no guard, so a retracted answer kept its question closed.
+The cause was `OpenQuestions` being absent from the test's check map.
 
-**FTS5 の `unicode61` は日本語を分割しない。** このプロジェクト自身の log が
-日本語なのに、「畳んだものは search で回収できる」が成立していなかった。
-`trigram` に変更。3文字未満のクエリは LIKE にフォールバックする。
+**FTS5's `unicode61` does not segment Japanese.** This project's own log is in
+Japanese, so "folded content is recoverable through search" was not actually
+true. Switched to `trigram`, with a `LIKE` fallback for queries under three
+characters.
 
-**モデルが最初に打つ検索はファイルパス。** そしてパスは FTS5 演算子の塊なので、
-生クエリを渡すと `syntax error near "/"` になる。**検索は0件を返すべきで、
-エラーを返してはいけない。**
+**The first thing a model searches for is a file path** — and a path is a string
+full of FTS5 operators, so a raw query yields `syntax error near "/"`. **A search
+should return zero rows, never an error.**
 
-## 12. 未解決
+## 12. Open problems
 
-- **書き忘れ問題（最大のリスク）** — 構造化イベントは明示 post 前提なので、
-  エージェントが書かなければ log は空。tool description とスキルで誘導しているが、
-  実測が要る。ここが失敗したら §2 の「自動キャプチャなし」を見直す
-- **セッションの粒度** — 現状 repo につき `main` 1本（`--session` で切れる）。
-  機能ブランチ単位・調査タスク単位に切りたくなるか
-- **コンパクション** — log が数千イベントになったとき。それまでの decision を
-  凝縮した合成 snapshot イベントを置き、新規参加者はそこから読む案
-- **participants の増殖** — 自動生成 id だと再起動のたびに行が増える。掃除が要る
+- **Write-forgetting (the biggest risk).** Structured events depend on explicit
+  posting, so the log is empty if agents do not write. Tool descriptions and the
+  skill nudge toward it, but this needs measurement. If it fails, the
+  "no auto-capture" stance in §2 is what gets revisited.
+- **Session granularity.** One `main` per repo today (`--session` splits it).
+  Whether feature branches or investigations want their own is unproven.
+- **Compaction.** What happens at thousands of events. The sketch is a synthetic
+  snapshot event condensing prior decisions, which new participants read first.
+- **Participant sprawl.** Auto-generated ids add a row per restart. Needs cleanup.
 
-## 13. 名前と既存プロダクト
+## 13. Naming and adjacent products
 
-当初は `sessionbus` の名で設計したが、`Jacobious52/sessionbus`（Rust、★0）が
-**同名かつ近コンセプト**だった: ローカルファースト、SQLite、MCP server、
-deterministic context packer。
+This was designed under the name `sessionbus` until `Jacobious52/sessionbus`
+(Rust, ★0) turned out to be **the same name and a near-identical concept**:
+local-first, SQLite, MCP server, deterministic context packer.
 
-ただし協調のトポロジーが違う:
+The collaboration topology differs, though:
 
 | | Jacobious52/sessionbus | copresence |
 |---|---|---|
-| 想定 | 人間1人が Codex→Cursor→Claude と渡り歩く。再説明をなくす | 複数エージェントが**同時並行**で走り、互いの発見を読む |
-| 単位 | engineering task / intent | finding / decision / open question |
-| 実装 | daemon + dashboard | デーモンレス |
+| Premise | one human moving between Codex → Cursor → Claude, avoiding re-explanation | several agents running **concurrently**, reading each other's findings |
+| Unit | engineering task / intent | finding / decision / open question |
+| Implementation | daemon + dashboard | daemonless |
 
-「逐次ハンドオフ」vs「並行 co-presence」。隣接するが同一ではない。
-それでも同名・同ジャンルは避けるべきなので改名した。
+Sequential handoff versus concurrent co-presence: adjacent, not identical. Even
+so, sharing a name in the same genre is worth avoiding, hence the rename.
 
-`copresence` を選んだ理由は空きだけではない。`bus` は message passing を
-連想させ、「指示の受け渡しをやめる」という §1 の中核主張と逆を向いていた。
-co-presence（同じ場に居合わせていること）はトポロジーそのものを指している。
-MCP の tool 名は `session_*` のまま残した — 参加者から見た対象は依然として
-「セッション」であり、そこを製品名に合わせる必要はない。
+`copresence` was not chosen only for availability. `bus` connotes message
+passing, pointing the opposite way from §1's central claim that the passing of
+instructions is what we are removing. Co-presence names the topology itself. The
+MCP tool names stay `session_*` — what a participant addresses is still a
+session, and there is no reason to bend that to the product name.
 
-その他の既存: MCP は縦(agent↔tool)、A2A は横だが結局メッセージパッシング、
-AutoGen/CrewAI はオーケストレータ中心、Letta/mem0 は単一エージェントの記憶。
-「ランタイム非依存 × ローカルファースト × 並行エージェント」は空いていると見ている。
+Other prior art: MCP is vertical (agent↔tool); A2A is horizontal but still
+message passing; AutoGen and CrewAI are orchestrator-centric; Letta and mem0 are
+single-agent memory. **Runtime-agnostic × local-first × concurrent agents** looks
+like open space.
