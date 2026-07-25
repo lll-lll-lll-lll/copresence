@@ -2,6 +2,8 @@ package usage
 
 import (
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -146,6 +148,58 @@ func TestParseSplitsCacheWriteTiersAndFallsBack(t *testing.T) {
 	// an expensive one.
 	if b := byID["msg_B"]; b.CacheWrite5m != 900 || b.CacheWrite1h != 0 {
 		t.Errorf("msg_B tiers = 5m:%d 1h:%d, want 5m:900 1h:0", b.CacheWrite5m, b.CacheWrite1h)
+	}
+}
+
+func TestDelegatedTranscriptsAreFoundAndKeptSeparate(t *testing.T) {
+	// Regression: discovery globbed only the top level of a project directory,
+	// so every subagent transcript was missed. The loss is invisible in a
+	// timeline — the parent sits idle while the subagent runs, so the gap looks
+	// like thinking time. On the session this was found in it hid $2.28.
+	root := t.TempDir()
+	sub := filepath.Join(root, "sess-1", SubagentDir)
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(root, "sess-1.jsonl")
+	child := filepath.Join(sub, "agent-a136fe7c.jsonl")
+	for _, f := range []string{parent, child} {
+		if err := os.WriteFile(f, []byte(transcript), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	found, err := transcriptsUnder(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 2 {
+		t.Fatalf("found %v, want both the parent and the delegated transcript", found)
+	}
+
+	// A delegated agent keeps its own identity even when an actor is passed;
+	// otherwise the parent looks expensive and the delegation looks free.
+	recs, err := ParseClaudeCodeFile(child, "claude-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range recs {
+		if r.Actor != "agent-a136fe7c" {
+			t.Errorf("actor = %q, want the delegated agent's id", r.Actor)
+		}
+		if !r.Subagent {
+			t.Error("a record from a subagents/ transcript must be marked delegated, " +
+				"even though its lines carry no isSidechain")
+		}
+	}
+
+	// The parent keeps the caller's actor and stays undelegated.
+	recs, err = ParseClaudeCodeFile(parent, "claude-main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recs[0].Actor != "claude-main" {
+		t.Errorf("parent actor = %q, want claude-main", recs[0].Actor)
 	}
 }
 
