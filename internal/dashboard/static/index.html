@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- No network is available to this page by policy and by design: the server
+     ships one HTML, one CSS and one JS file and nothing else. A dashboard that
+     reaches out to a CDN is a dashboard that stops working on a plane. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<title>copresence</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='14'>◍</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand">
+    <span class="dot" id="live" title="polling"></span>
+    <strong>copresence</strong>
+    <span class="sep">/</span>
+    <span id="session" class="mono">—</span>
+  </div>
+  <div class="bar-meta">
+    <span id="workspace" class="mono muted">—</span>
+    <span id="head" class="pill mono">#0</span>
+  </div>
+  <div class="bar-controls">
+    <label>window
+      <select id="since">
+        <option value="">all time</option>
+        <option value="24h">24h</option>
+        <option value="7d">7d</option>
+        <option value="30d">30d</option>
+      </select>
+    </label>
+    <label class="check">
+      <input type="checkbox" id="all-projects"> all projects
+    </label>
+    <label class="check">
+      <input type="checkbox" id="autorefresh" checked> auto
+    </label>
+    <button id="refresh" type="button">refresh</button>
+  </div>
+</header>
+
+<div id="error" class="error" hidden></div>
+
+<section class="kpis" id="kpis"></section>
+
+<main class="grid">
+  <section class="card" id="card-participants">
+    <h2>Participants <span class="count" id="n-participants"></span></h2>
+    <div class="body" id="participants"></div>
+  </section>
+
+  <section class="card" id="card-questions">
+    <h2>Open questions <span class="count" id="n-questions"></span></h2>
+    <div class="body" id="questions"></div>
+  </section>
+
+  <section class="card" id="card-decisions">
+    <h2>Decisions <span class="count" id="n-decisions"></span></h2>
+    <div class="body" id="decisions"></div>
+  </section>
+
+  <section class="card wide" id="card-cost">
+    <h2>
+      Spend <span class="count mono" id="cost-scope"></span>
+      <span class="chip" id="run-chip" hidden></span>
+    </h2>
+    <div class="body">
+      <div id="chart"></div>
+      <div class="tabs" id="cost-tabs">
+        <button type="button" data-dim="by_run" class="on">run</button>
+        <button type="button" data-dim="by_actor">actor</button>
+        <button type="button" data-dim="by_model">model</button>
+        <button type="button" data-dim="by_scope">scope</button>
+        <button type="button" data-dim="by_project">project</button>
+        <button type="button" data-dim="by_source">source</button>
+      </div>
+      <div id="cost-table"></div>
+    </div>
+  </section>
+
+  <section class="card wide" id="card-timeline">
+    <h2>
+      Timeline
+      <span class="count" id="n-timeline"></span>
+      <select id="type" class="inline"><option value="">all types</option></select>
+    </h2>
+    <div class="body" id="timeline"></div>
+  </section>
+</main>
+
+<footer class="foot">
+  <span class="mono muted" id="generated">—</span>
+  <span class="muted">read-only · localhost only · <code>copresence usage import</code> refreshes spend</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

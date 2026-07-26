@@ -35,6 +35,7 @@ usage: copresence <command> [flags]
   digest               print decisions, open questions, participants
   export               write a committable Markdown summary
   usage                token and cost accounting (see: usage --help)
+  dashboard            serve a read-only web view on localhost
   doctor               report on the current workspace
 
 Common flags: --session NAME (default "main"), --dir PATH (default: cwd)
@@ -75,6 +76,8 @@ func run(args []string) error {
 		return cmdExport(rest)
 	case "usage":
 		return cmdUsage(rest)
+	case "dashboard":
+		return cmdDashboard(rest)
 	case "doctor":
 		return cmdDoctor(rest)
 	default:

@@ -273,6 +273,47 @@ func (s *Store) Since(ctx context.Context, session string, seq int64, limit int)
 		session, seq, limit)
 }
 
+// Latest returns live events newest first, optionally restricted to one type.
+//
+// Since reads forward from a seq, which is what a catching-up participant
+// wants. A human opening a dashboard on a long-running session wants the other
+// end: the last twenty events, not the first twenty.
+func (s *Store) Latest(ctx context.Context, session, typ string, limit int) ([]event.Event, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	q := `SELECT ` + selectCols + ` FROM events e WHERE e.session = ? AND ` + notSuperseded
+	args := []any{session}
+	if typ != "" {
+		q += ` AND e.type = ?`
+		args = append(args, typ)
+	}
+	q += ` ORDER BY e.seq DESC LIMIT ?`
+	args = append(args, limit)
+	return s.query(ctx, q, args...)
+}
+
+// CountsByType reports how many live events of each type the session holds.
+func (s *Store) CountsByType(ctx context.Context, session string) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT e.type, COUNT(*) FROM events e WHERE e.session = ? AND `+notSuperseded+` GROUP BY e.type`,
+		session)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var t string
+		var n int
+		if err := rows.Scan(&t, &n); err != nil {
+			return nil, err
+		}
+		out[t] = n
+	}
+	return out, rows.Err()
+}
+
 // ByType returns all live events of a type, oldest first.
 func (s *Store) ByType(ctx context.Context, session string, t event.Type) ([]event.Event, error) {
 	return s.query(ctx,
