@@ -16,6 +16,12 @@ import (
 // SourceClaudeCode identifies records imported from a Claude Code transcript.
 const SourceClaudeCode = "claude-code"
 
+// syntheticModel marks an assistant turn the client fabricated rather than one
+// a model produced — "No response requested.", interrupt notices and the like.
+// Its usage block is all zeroes and no request was ever billed, so importing it
+// adds a phantom call and an unpriced-model warning that can never be resolved.
+const syntheticModel = "<synthetic>"
+
 // claudeLine is the subset of a Claude Code JSONL entry that carries usage.
 type claudeLine struct {
 	Type        string `json:"type"`
@@ -66,6 +72,9 @@ func ParseClaudeCode(r io.Reader, actor string) ([]Record, error) {
 		if l.Type != "assistant" || l.Message.Usage == nil || l.Message.ID == "" {
 			continue
 		}
+		if l.Message.Model == syntheticModel {
+			continue
+		}
 		if seen[l.Message.ID] {
 			continue
 		}
@@ -81,6 +90,7 @@ func ParseClaudeCode(r io.Reader, actor string) ([]Record, error) {
 			TS:              ts,
 			Source:          SourceClaudeCode,
 			ExternalID:      l.Message.ID,
+			RunID:           l.SessionID,
 			Model:           l.Message.Model,
 			Speed:           u.Speed,
 			CWD:             l.CWD,
@@ -121,6 +131,19 @@ func subagentActor(path string) string {
 	return strings.TrimSuffix(filepath.Base(path), ".jsonl")
 }
 
+// runFromPath recovers the run id from a transcript's location, for lines that
+// carry no sessionId of their own.
+//
+// Claude Code names a main transcript <run-id>.jsonl and nests delegated ones
+// at <run-id>/subagents/<agent>.jsonl, so in both cases the run is on the path.
+// This is only a fallback: the id inside the lines is authoritative.
+func runFromPath(path string) string {
+	if delegated := subagentActor(path); delegated != "" {
+		return filepath.Base(filepath.Dir(filepath.Dir(path)))
+	}
+	return strings.TrimSuffix(filepath.Base(path), ".jsonl")
+}
+
 // ParseClaudeCodeFile is ParseClaudeCode over a path.
 //
 // A delegated agent keeps its own identity even when the caller passes an
@@ -142,13 +165,21 @@ func ParseClaudeCodeFile(path, actor string) ([]Record, error) {
 	}
 
 	recs, err := ParseClaudeCode(f, actor)
-	if err != nil || delegated == "" {
+	if err != nil {
 		return recs, err
 	}
-	// Lines inside a subagent transcript do not carry isSidechain; the path is
-	// what marks them as delegated.
+	run := runFromPath(path)
 	for i := range recs {
-		recs[i].Subagent = true
+		if recs[i].RunID == "" {
+			recs[i].RunID = run
+		}
+		// The path is the authoritative marker for delegated work. Observed
+		// transcripts do set isSidechain on their lines, but relying on that
+		// alone would make every subagent's spend silently reattach to the
+		// parent the day a writer stops emitting it.
+		if delegated != "" {
+			recs[i].Subagent = true
+		}
 	}
 	return recs, nil
 }

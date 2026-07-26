@@ -1,6 +1,31 @@
 package usage
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
+// ParseSince turns a lookback window into an absolute cutoff. It accepts a Go
+// duration plus a "d" suffix for days, which is what people type when asking
+// about spend. An empty string means no cutoff.
+func ParseSince(s string) (time.Time, error) {
+	if s == "" {
+		return time.Time{}, nil
+	}
+	if days, ok := strings.CutSuffix(s, "d"); ok {
+		d, err := time.ParseDuration(days + "h")
+		if err != nil {
+			return time.Time{}, fmt.Errorf("bad since %q (try 24h or 7d)", s)
+		}
+		return time.Now().Add(-d * 24), nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("bad since %q (try 24h or 7d)", s)
+	}
+	return time.Now().Add(-d), nil
+}
 
 // Record is one billable model call.
 type Record struct {
@@ -13,6 +38,17 @@ type Record struct {
 	// makes re-importing a growing transcript safe.
 	Source     string `json:"source"`
 	ExternalID string `json:"external_id"`
+	// RunID is the runtime's own session id — one invocation of the agent, from
+	// the first prompt to the last. Deliberately not called SessionID: Session
+	// above is the copresence session, and one copresence session outlives many
+	// runs.
+	//
+	// This is the second byproduct signal, alongside CWD, and the one that
+	// matches a unit of work most closely: nobody declares it, and a delegated
+	// agent inherits its parent's, so a run's cost includes the work it handed
+	// off. Source scopes it, so a future Codex importer can fill the same
+	// column without its ids colliding with Claude Code's.
+	RunID string `json:"run_id,omitempty"`
 
 	Model string `json:"model"`
 	Speed string `json:"speed,omitempty"`
@@ -64,13 +100,19 @@ func (r *Record) Cost() {
 }
 
 // Summary aggregates records along one dimension for reporting.
+//
+// First and Last bound the group in time. They exist mainly for runs: a run id
+// is a UUID, and "07-25 08:12 → 19:31" is how a human recognizes which session
+// of work it was.
 type Summary struct {
-	Key             string  `json:"key"`
-	Calls           int64   `json:"calls"`
-	InputTokens     int64   `json:"input_tokens"`
-	OutputTokens    int64   `json:"output_tokens"`
-	CacheReadTokens int64   `json:"cache_read_tokens"`
-	CacheWriteToken int64   `json:"cache_write_tokens"`
-	CostUSD         float64 `json:"cost_usd"`
-	UnpricedCalls   int64   `json:"unpriced_calls"`
+	Key             string    `json:"key"`
+	First           time.Time `json:"first"`
+	Last            time.Time `json:"last"`
+	Calls           int64     `json:"calls"`
+	InputTokens     int64     `json:"input_tokens"`
+	OutputTokens    int64     `json:"output_tokens"`
+	CacheReadTokens int64     `json:"cache_read_tokens"`
+	CacheWriteToken int64     `json:"cache_write_tokens"`
+	CostUSD         float64   `json:"cost_usd"`
+	UnpricedCalls   int64     `json:"unpriced_calls"`
 }

@@ -221,3 +221,81 @@ func TestParseCapturesSubagentDimensionAndSurvivesJunk(t *testing.T) {
 		t.Errorf("subagent records = %d, want 1", sub)
 	}
 }
+
+func TestRunIDComesFromTheTranscriptAndFallsBackToThePath(t *testing.T) {
+	// A run is the unit of work that costs money: one invocation of the agent,
+	// start to finish. It is a byproduct — nobody declares it — which is why it
+	// is worth more than any marker an agent has to remember to post.
+	recs, err := ParseClaudeCode(strings.NewReader(transcript), "me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range recs {
+		if r.RunID != "" {
+			t.Errorf("RunID = %q, want empty: these lines carry no sessionId", r.RunID)
+		}
+	}
+
+	root := t.TempDir()
+	const run = "4afcba68-e360-4fd9-9ebe-b3529ab0d771"
+	sub := filepath.Join(root, run, SubagentDir)
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(root, run+".jsonl")
+	child := filepath.Join(sub, "agent-a136fe7c.jsonl")
+	for _, f := range []string{parent, child} {
+		if err := os.WriteFile(f, []byte(transcript), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Both the main transcript and its delegated one resolve to the same run:
+	// the id is on the path in both layouts. A subagent that landed under its
+	// own id would break the rollup that makes a run's cost total.
+	for _, path := range []string{parent, child} {
+		recs, err := ParseClaudeCodeFile(path, "me")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range recs {
+			if r.RunID != run {
+				t.Errorf("%s: RunID = %q, want %q", filepath.Base(path), r.RunID, run)
+			}
+		}
+	}
+}
+
+func TestSessionIDInTheLineWinsOverThePath(t *testing.T) {
+	// The path is only a fallback. If the two ever disagree, the transcript is
+	// the one that knows.
+	root := t.TempDir()
+	path := filepath.Join(root, "renamed-file.jsonl")
+	const line = `{"type":"assistant","sessionId":"real-run","timestamp":"2026-07-25T07:00:00.000Z",` +
+		`"message":{"id":"msg_X","model":"claude-opus-5","usage":{"output_tokens":5}}}`
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := ParseClaudeCodeFile(path, "me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 || recs[0].RunID != "real-run" {
+		t.Errorf("RunID = %+v, want the sessionId from the line", recs)
+	}
+}
+
+func TestFabricatedAssistantTurnsAreNotImported(t *testing.T) {
+	// Claude Code writes its own assistant turns for things like "No response
+	// requested." They carry model "<synthetic>", an all-zero usage block, and
+	// no billing behind them. Importing one adds a call that never happened and
+	// an unpriced-model warning that can never be cleared.
+	const line = `{"type":"assistant","timestamp":"2026-07-25T07:00:00.000Z","message":` +
+		`{"id":"61e3b78e","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}}}`
+	recs, err := ParseClaudeCode(strings.NewReader(line), "me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 0 {
+		t.Errorf("got %d records, want none: %+v", len(recs), recs)
+	}
+}

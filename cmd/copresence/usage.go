@@ -19,12 +19,18 @@ const usageHelp = `copresence usage — token and cost accounting
   usage [report]           show spend by actor, model, and scope
   usage records            raw rows as JSON, newest first (dashboard feed)
 
-Flags: --by actor|model|day|scope|project  --since 7d  --json  --limit N
+Flags: --by actor|model|day|scope|project|run|source  --since 7d  --json --limit N
+       --run ID        one run of an agent runtime (a prefix is enough)
        --all-projects  include work done outside this workspace
 
 Reports cover this workspace only. Transcripts are keyed by the directory a
 session started in, so one opened in a parent directory also carries sibling
 projects' spend; --all-projects shows it, --by project breaks it down.
+
+A "run" is one invocation of an agent runtime, start to finish — Claude Code's
+own session id. Delegated agents inherit their caller's, so a run's cost
+includes the work it handed off. Runs and projects cut across each other: one
+run often touches several directories.
 `
 
 func cmdUsage(args []string) error {
@@ -117,14 +123,15 @@ func cmdUsageImport(args []string) error {
 func cmdUsageReport(args []string) error {
 	fs := flag.NewFlagSet("usage", flag.ExitOnError)
 	c := bind(fs, false)
-	by := fs.String("by", "", "aggregate by actor, model, day, scope, or project")
+	by := fs.String("by", "", "aggregate by actor, model, day, scope, project, run, or source")
 	sinceFlag := fs.String("since", "", "only usage after this window, e.g. 24h or 7d")
+	run := fs.String("run", "", "only this run of an agent runtime (prefix is enough)")
 	asJSON := fs.Bool("json", false, "emit JSON")
 	all := fs.Bool("all-projects", false, "include work done outside this workspace")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	filter, root, err := c.usageFilter(*sinceFlag, *all)
+	filter, root, err := c.usageFilter(*sinceFlag, *run, *all)
 	if err != nil {
 		return err
 	}
@@ -170,6 +177,9 @@ func cmdUsageReport(args []string) error {
 	} else {
 		fmt.Printf(" across all projects")
 	}
+	if filter.RunPrefix != "" {
+		fmt.Printf(", run %s*", filter.RunPrefix)
+	}
 	if !filter.Since.IsZero() {
 		fmt.Printf(" since %s", filter.Since.Local().Format("2006-01-02 15:04"))
 	}
@@ -184,10 +194,25 @@ func cmdUsageReport(args []string) error {
 		if len(rows) == 0 {
 			continue
 		}
+		// A run id is a UUID; on its own it identifies nothing a human
+		// recognizes. The clock span is what says which piece of work it was.
+		span := d == "run"
 		fmt.Printf("\nby %s\n", d)
-		fmt.Printf("  %-28s %6s %10s %10s %10s %9s\n", "", "calls", "in", "out", "cache", "cost")
+		fmt.Printf("  %-28s ", "")
+		if span {
+			fmt.Printf("%-19s ", "when")
+		}
+		fmt.Printf("%6s %10s %10s %10s %9s\n", "calls", "in", "out", "cache", "cost")
 		for _, r := range rows {
-			fmt.Printf("  %-28s %6d %10s %10s %10s %9s\n", shortKey(r.Key, 28), r.Calls,
+			key := shortKey(r.Key, 28)
+			if span {
+				key = shortRun(r.Key)
+			}
+			fmt.Printf("  %-28s ", key)
+			if span {
+				fmt.Printf("%-19s ", timeSpan(r.First, r.Last))
+			}
+			fmt.Printf("%6d %10s %10s %10s %9s\n", r.Calls,
 				humanTokens(r.InputTokens), humanTokens(r.OutputTokens),
 				humanTokens(r.CacheReadTokens+r.CacheWriteToken), fmt.Sprintf("$%.2f", r.CostUSD))
 		}
@@ -199,12 +224,13 @@ func cmdUsageRecords(args []string) error {
 	fs := flag.NewFlagSet("usage records", flag.ExitOnError)
 	c := bind(fs, false)
 	sinceFlag := fs.String("since", "", "only usage after this window, e.g. 24h or 7d")
+	run := fs.String("run", "", "only this run of an agent runtime (prefix is enough)")
 	limit := fs.Int("limit", 1000, "max rows")
 	all := fs.Bool("all-projects", false, "include work done outside this workspace")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	filter, _, err := c.usageFilter(*sinceFlag, *all)
+	filter, _, err := c.usageFilter(*sinceFlag, *run, *all)
 	if err != nil {
 		return err
 	}
@@ -225,8 +251,8 @@ func cmdUsageRecords(args []string) error {
 // usageFilter builds the query filter. Reports scope to the workspace by
 // default: a transcript directory can span sibling projects, and a total that
 // silently includes unrelated work is worse than one that says what it covers.
-func (c *common) usageFilter(sinceFlag string, allProjects bool) (store.Filter, string, error) {
-	since, err := parseSince(sinceFlag)
+func (c *common) usageFilter(sinceFlag, run string, allProjects bool) (store.Filter, string, error) {
+	since, err := usage.ParseSince(sinceFlag)
 	if err != nil {
 		return store.Filter{}, "", err
 	}
@@ -234,31 +260,38 @@ func (c *common) usageFilter(sinceFlag string, allProjects bool) (store.Filter, 
 	if err != nil {
 		return store.Filter{}, "", err
 	}
-	f := store.Filter{Since: since}
+	f := store.Filter{Since: since, RunPrefix: run}
 	if !allProjects {
 		f.CWDPrefix = root
 	}
 	return f, root, nil
 }
 
-// parseSince accepts a Go duration plus a "d" suffix for days, which is what
-// people actually type when asking about spend.
-func parseSince(s string) (time.Time, error) {
-	if s == "" {
-		return time.Time{}, nil
+// shortRun trims a "<source>:<uuid>" key to its recognizable head. Blind
+// truncation would keep the source and throw away the id, and the id's first
+// few characters are the part you type back into --run.
+func shortRun(key string) string {
+	source, id, ok := strings.Cut(key, ":")
+	if !ok {
+		return key
 	}
-	if days, ok := strings.CutSuffix(s, "d"); ok {
-		d, err := time.ParseDuration(days + "h")
-		if err != nil {
-			return time.Time{}, fmt.Errorf("bad --since %q", s)
-		}
-		return time.Now().Add(-d * 24), nil
+	if len(id) > 8 {
+		id = id[:8]
 	}
-	d, err := time.ParseDuration(s)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("bad --since %q (try 24h or 7d)", s)
+	return source + ":" + id
+}
+
+// timeSpan renders a group's clock range, dropping the date on the far end
+// when both ends land on the same day.
+func timeSpan(first, last time.Time) string {
+	if first.IsZero() {
+		return ""
 	}
-	return time.Now().Add(-d), nil
+	f, l := first.Local(), last.Local()
+	if f.YearDay() == l.YearDay() && f.Year() == l.Year() {
+		return f.Format("01-02 15:04") + "→" + l.Format("15:04")
+	}
+	return f.Format("01-02 15:04") + "→" + l.Format("01-02")
 }
 
 func humanTokens(n int64) string {
