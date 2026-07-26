@@ -71,7 +71,29 @@ copresence digest                    # 決定事項・未解決の問い・参�
 copresence doctor                    # 参加者と各自の既読位置
 copresence catchup --as me --peek    # ある参加者が受け取る内容を確認する
 copresence export --out NOTES.md     # コミットできる Markdown 要約
+copresence dashboard --open          # 同じセッションをブラウザで見る
 ```
+
+## ダッシュボード
+
+`copresence dashboard` は localhost に読み取り専用のビューを立てる。参加者と各自の
+遅れ具合、未解決の問い、決定のタイムライン、そして run / 参加者 / モデル / プロジェクト
+/ scope 別のコスト。
+
+```bash
+copresence dashboard --port 8787 --open
+```
+
+**コストのダッシュボードではない。** transcript を解析して値付けする仕事は
+[ccusage](https://github.com/ryoppippi/ccusage) が既に、この規模のプロジェクトが
+到底追いつけない数のランタイムに対してやっている。あちらに出せないのは copresence
+だけが持っているもの —— **その支出が買ったセッションの隣に支出が並んでいる**という形。
+
+サーバーはループバック限定で、そこは設定にしていない。DB にはワークスペースのパスと
+エージェントがコードについて言ったこと全部が入っているため。書き込みルートは1つも
+無く、ループバック以外の `Host` を持つリクエストは拒否し（DNS リバインディング対策）、
+cross-site も拒否する。ページは HTML/CSS/JS を1つずつ埋め込んだだけで CDN を引かない
+ので、オフラインでも動く。
 
 ## トークンとコスト
 
@@ -81,19 +103,42 @@ copresence export --out NOTES.md     # コミットできる Markdown 要約
 ```bash
 copresence usage import              # Claude Code の transcript を取り込む（冪等）
 copresence usage                     # 参加者別・モデル別・メイン vs サブエージェント別
+copresence usage --by run            # エージェント1起動ぶん（最初から最後まで）
+copresence usage --run 4afcba68      # その run に絞る（先頭一致でよい）
 copresence usage --by day --since 7d
 copresence usage records --json      # 生データを新しい順に。ダッシュボードのフィード
 ```
 
 ```
-session "main"
-  143 calls   $18.07   19.2M tokens
+session "main" across all projects
+  391 calls   $65.96   91.7M tokens
 
-by model
-                            calls         in        out      cache      cost
-  claude-opus-5               117        219     152.2k      18.3M    $17.01
-  claude-opus-4-8              26       3.8k      17.2k     744.0k     $1.06
+by run
+                               when                 calls         in        out      cache      cost
+  claude-code:4afcba68         07-25 16:26→22:17      365       4.6k     333.9k      90.6M    $64.90
+  claude-code:97dfea59         07-11 01:39→01:51       26       3.8k      17.2k     744.0k     $1.06
 ```
+
+### どの仕事にいくらかかったか
+
+「これはいくらだったのか」に正直に答えるには**仕事の単位**が要る。そして一番手軽な
+やり方 —— エージェントに開始と終了を申告させる —— は
+[§12](DESIGN.ja.md#12-未解決) が本プロジェクト最大のリスクとして
+名指ししているものそのものだ。**エージェントは書き忘れる。** これを作った実際のログでは
+`status` は **27件中2件**しか出ていない。ドキュメントに書いてあり、しかも投稿した本人に
+即座に見返り（衝突回避）があるにもかかわらず。
+
+なので帰属は、**作業をすれば勝手に残る信号**だけで組んである。この種の信号は
+全部あるか全く無いかのどちらかで、中途半端に欠けることがない:
+
+- **`--by project`** — 作業していたディレクトリ。
+- **`--by run`** — ランタイム自身のセッション ID。委譲されたエージェントは呼び出し元の
+  ものを引き継ぐので、run のコストには**委譲した先の仕事も含まれる**。
+- **`--by scope`** — メインループか委譲エージェントか。
+
+この3つは互いに直交している。そこが要点で、実際このプロジェクト自身のある run は
+3つのディレクトリにまたがっていたし、最初このリポジトリの支出に見えていたものの13%は
+別プロジェクトのものだった。
 
 素朴な実装だと間違える点が3つある:
 

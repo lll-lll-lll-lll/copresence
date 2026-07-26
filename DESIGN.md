@@ -202,11 +202,45 @@ catchup budget on rows nobody reads. It gets its own `usage` table.
 CREATE TABLE usage (
   session, actor, ts, source, external_id,   -- (source, external_id) is UNIQUE
   model, speed, subagent,
+  cwd, run_id,                               -- what the spend is attributable to
   input_tokens, output_tokens, cache_read_tokens,
   cache_write_5m, cache_write_1h,
   cost_usd, priced
 );
 ```
+
+### Attributing spend to work
+
+"What did this piece of work cost" needs a unit of work. The obvious way to get
+one is to have agents declare when they start and finish — which is exactly the
+write-forgetting risk of §12, the biggest one this project has. Measured on this
+project's own log: **two `status` events out of 27**, despite `status` being
+documented and paying the agent that posts it back immediately in collision
+avoidance. A declared marker that is kept half the time is worse than none,
+because the resulting numbers look precise.
+
+So attribution uses only **byproduct signals** — things recorded because the
+work happened, not because anyone remembered to say so. They are complete or
+absent, never partial:
+
+| column | unit | how it is obtained |
+|---|---|---|
+| `cwd` | the directory worked in | present on every transcript line |
+| `run_id` | one invocation of a runtime, first prompt to last | the runtime's own session id |
+| `subagent` | main loop vs delegated | the transcript's path |
+
+`run_id` is deliberately not called `session_id`: `session` already means the
+copresence session, and one of those outlives many runs. It is qualified by
+`source` when grouped, so a second runtime's ids cannot merge into a first's.
+
+**Delegated agents inherit their caller's run**, because Claude Code writes the
+parent's `sessionId` into the subagent transcript. A run's cost therefore
+includes the work it handed off, while `subagent` still separates the two within
+it.
+
+The dimensions cut across each other, which is why more than one is kept: a
+single run of this project's own sessions spanned three directories, and 13% of
+what first looked like this repository's spend belonged to sibling projects.
 
 **Cache pricing has three tiers**, all relative to the input rate: read = 0.1×,
 5-minute cache write = 1.25×, 1-hour cache write = **2×**. Collapsing 5m and 1h
@@ -246,9 +280,42 @@ transcripts grow and the same file is read repeatedly.
 
 ```
 copresence usage import [FILE...]   # import (auto-discovers by default)
-copresence usage [--by day] [--since 7d] [--json]
+copresence usage [--by actor|model|day|scope|project|run|source]
+                 [--since 7d] [--run ID] [--all-projects] [--json]
 copresence usage records --limit N  # raw JSON — the dashboard feed
 ```
+
+Reports scope to the workspace by default. `--run` matches on a prefix, because
+run ids are UUIDs and nobody types one.
+
+## 9b. Dashboard
+
+`copresence dashboard` serves the session read-only on loopback: participants
+and how far each has read, open questions, decisions, the timeline, and spend
+across every dimension above.
+
+**It is not a cost dashboard.** [ccusage](https://github.com/ryoppippi/ccusage)
+already parses transcripts and prices them across many more runtimes. The thing
+only copresence can put on one page is the spend next to the session it bought.
+
+Constraints that fall out of what the database contains — the workspace path and
+everything the agents said about the code:
+
+- **One `GET /api/state`.** Four panes polled separately would disagree about
+  the head; one snapshot cannot.
+- **No write routes exist.** Not "protected" — absent.
+- **Loopback only, not configurable.** Requests whose `Host` is not loopback are
+  refused, which is what stops DNS rebinding: the attacker's page reaches the
+  port but still sends their hostname. `Sec-Fetch-Site` rejects cross-site reads.
+  `http.CrossOriginProtection` does not help here — it exempts safe methods by
+  design, and every route is a GET whose *response* is the asset.
+- **Assets are embedded and self-contained.** No CDN, so it works offline.
+- **The page builds DOM with `textContent`.** Event bodies are agent-written
+  text; the way to be sure none of it parses as markup is to never hand it to a
+  parser.
+- **A run filter narrows spend only**, and says so on screen: events carry no
+  run id, so silently emptying the timeline would read as "this run did
+  nothing".
 
 ## 10. Current state (v0)
 
