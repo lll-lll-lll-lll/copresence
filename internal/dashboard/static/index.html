@@ -71,14 +71,24 @@
     </h2>
     <div class="body">
       <div id="chart"></div>
+      <!-- Each tab carries its own explanation in title=. The hint line below
+           reads it back out, so the text lives in exactly one place and shows
+           up both on hover and for the tab you are already looking at. -->
       <div class="tabs" id="cost-tabs">
-        <button type="button" data-dim="by_run" class="on">run</button>
-        <button type="button" data-dim="by_actor">actor</button>
-        <button type="button" data-dim="by_model">model</button>
-        <button type="button" data-dim="by_scope">scope</button>
-        <button type="button" data-dim="by_project">project</button>
-        <button type="button" data-dim="by_source">source</button>
+        <button type="button" data-dim="by_run" class="on"
+          title="One agent session, from its first prompt to its last. Work it delegated counts toward the session that asked for it. Click a row to show only that session's spend.">run</button>
+        <button type="button" data-dim="by_actor"
+          title="Who made the call — a named participant, or a delegated agent under its own id.">actor</button>
+        <button type="button" data-dim="by_model"
+          title="Which model was billed. Cache reads cost a tenth of fresh input, so a big token count is not always a big bill.">model</button>
+        <button type="button" data-dim="by_scope"
+          title="The agent you talked to, versus the agents it handed work off to. Answers &quot;how much are subagents costing me&quot;.">scope</button>
+        <button type="button" data-dim="by_project"
+          title="The directory the agent was working in. One session can move between several, so this is not the same split as run.">project</button>
+        <button type="button" data-dim="by_source"
+          title="Which tool produced the transcript — claude-code today, other runtimes as importers are added.">source</button>
       </div>
+      <p class="hint" id="cost-hint"></p>
       <div id="cost-table"></div>
     </div>
   </section>

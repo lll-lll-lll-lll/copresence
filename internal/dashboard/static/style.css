@@ -263,6 +263,14 @@ tr.picked td:first-child::before { content: "▸ "; color: var(--accent); }
 }
 
 .tabs { display: flex; gap: 6px; padding: 10px 14px 6px; flex-wrap: wrap; }
+
+.hint {
+  margin: 0;
+  padding: 2px 14px 8px;
+  color: var(--muted);
+  font-size: 12px;
+  max-width: 78ch;
+}
 .tabs button { color: var(--muted); }
 .tabs button.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 

@@ -16,7 +16,7 @@ const ui = {
   participants: $("participants"), questions: $("questions"), decisions: $("decisions"),
   timeline: $("timeline"), chart: $("chart"), costTable: $("cost-table"),
   costTabs: $("cost-tabs"), costScope: $("cost-scope"), generated: $("generated"),
-  runChip: $("run-chip"),
+  costHint: $("cost-hint"), runChip: $("run-chip"),
   nParticipants: $("n-participants"), nQuestions: $("n-questions"),
   nDecisions: $("n-decisions"), nTimeline: $("n-timeline"),
 };
@@ -141,21 +141,31 @@ function renderKPIs(s) {
   const allTokens = (t.input_tokens || 0) + (t.output_tokens || 0) +
     (t.cache_read_tokens || 0) + (t.cache_write_tokens || 0);
 
+  // Every tile carries the sentence that says what it counts. The labels are
+  // short enough to be ambiguous on their own — "delegated" and "session"
+  // especially — and a number nobody can interpret is worse than no tile.
   const tiles = [
-    ["spend", money(t.cost_usd), `${t.calls || 0} model calls`],
-    ["tokens", tokens(allTokens), `${tokens(t.output_tokens)} generated`],
+    ["spend", money(t.cost_usd), `${t.calls || 0} model calls`,
+      "What these agents cost, for the directories and time window selected above."],
+    ["tokens", tokens(allTokens), `${tokens(t.output_tokens)} generated`,
+      "Every token touched, cached or not. Most of them are cache reads, which bill at a tenth of fresh input — this number runs far ahead of the cost."],
     ["delegated", sub ? money(sub.cost_usd) : "$0.00",
-      sub ? `${sub.calls} calls in subagents` : "no delegated work"],
-    ["session", "#" + s.head, `${(s.questions || []).length} open · ${behind} behind`],
+      sub ? `${sub.calls} calls in subagents` : "no delegated work",
+      "The share spent by agents that the main agent handed work off to. Their time looks like idle time in a transcript, so it is easy to miss entirely."],
+    ["session", "#" + s.head, `${(s.questions || []).length} open · ${behind} behind`,
+      "The newest event in the shared log, how many questions nobody has answered, and how many participants have unread events waiting."],
   ];
   clear(ui.kpis);
-  for (const [k, v, note] of tiles) {
+  for (const [k, v, note, help] of tiles) {
     const card = el("div", "kpi");
+    card.title = help;
     card.append(el("div", "k", k), el("div", "v", v), el("div", "s", note));
     ui.kpis.append(card);
   }
   if (t.unpriced_calls > 0) {
     const card = el("div", "kpi");
+    card.title = "Calls whose model has no rate in the price table. They count tokens but add $0.00, " +
+      "so the total above is a floor, not the whole bill.";
     card.append(el("div", "k", "unpriced"), el("div", "v", t.unpriced_calls),
       el("div", "s", "calls with no known rate"));
     ui.kpis.append(card);
@@ -231,7 +241,16 @@ function span(first, last) {
   return `${md(a)} ${hhmm(a)}→${sameDay ? hhmm(b) : md(b)}`;
 }
 
+// updateHint spells out what the selected breakdown actually means. "scope" and
+// "run" are the project's own words for things nobody can be expected to guess,
+// and a table of numbers under an unexplained label is not an answer.
+function updateHint() {
+  const on = ui.costTabs.querySelector("button.on");
+  ui.costHint.textContent = on ? on.title : "";
+}
+
 function renderCost(u) {
+  updateHint();
   ui.costScope.textContent = shortPath(u.scope || "", 46) + (u.since ? ` · last ${u.since}` : "");
 
   // The chip has to say "spend" out loud: the rest of the page is still showing
@@ -374,6 +393,7 @@ ui.costTabs.addEventListener("click", (e) => {
   if (!b) return;
   costDim = b.dataset.dim;
   for (const other of ui.costTabs.children) other.classList.toggle("on", other === b);
+  updateHint(); // immediately, rather than after the round trip
   load();
 });
 // Coming back to a backgrounded tab should not show a five-second-old number.
