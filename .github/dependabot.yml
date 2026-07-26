@@ -3,12 +3,26 @@ version: 2
 # Pinning actions to commit SHAs (see workflows/ci.yml) only improves security
 # if something updates those pins. Without this file, pinning trades "a tag
 # could be repointed at malicious code" for "we are frozen on a version with a
-# known vulnerability" — which is usually the worse of the two.
+# known vulnerability" — which is usually the worse of the two. Dependabot
+# rewrites the SHA and the `# v7.0.1` comment beside it together, so the pin
+# stays readable.
+#
+# On cooldown: the supply-chain attack it blunts is a compromised maintainer
+# account publishing a malicious release, which is typically spotted and yanked
+# within hours. Adopting a version that is twenty minutes old removes the window
+# in which anyone could notice. Three days is a floor underneath the weekly
+# cadence, and it earns its place on the releases that land a day or two before
+# a run — without it those get taken almost immediately.
+#
+# It deliberately does not apply to *security* updates; Dependabot excludes
+# them, so a known vulnerability is still fixed at once.
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
     groups:
       actions:
         patterns: ["*"]
@@ -19,6 +33,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 3
     groups:
       # One PR for the whole set: this module has few direct dependencies, and
       # a batched bump is easier to review than six near-identical PRs.
