@@ -39,12 +39,23 @@ MCP 対応のランタイムに登録する。Claude Code の場合:
 claude mcp add copresence -- copresence mcp --as claude-1 --dir "$PWD"
 ```
 
-2つめのエージェントを別の `--as` で起動すれば、セッションを共有できる。`--as` を
-省略するとプロセスごとに自動生成される — 手軽だが、**再起動をまたいで既読位置が
-残るのは安定した id を渡したときだけ**。
+Codex の場合:
 
-> 同時に走らせるエージェントには**必ず別々の `--as` を与えること**。同じ id を共有すると
-> 共有が無言で壊れる: 互いのイベントを「自分が書いたもの」として除外し合うため。
+```bash
+codex mcp add copresence -- copresence mcp --runtime codex --dir "$PWD"
+```
+
+2つめのエージェントを起動すれば、セッションを共有できる。`--as` を省略すると安全な
+id がプロセスごとに自動生成される。再起動をまたいで既読位置を残す場合は、各エージェントに
+異なる安定した `--as` を渡す。
+
+> 同時に走らせるエージェントに**同じ `--as` を与えないこと**。同じ id を共有すると
+> 互いのイベントを「自分が書いたもの」として除外し合い、共有が無言で壊れる。`--as` を
+> 省略すればプロセスごとに異なる id が生成されるため安全。
+
+session skill と任意の起動 hook を含むランタイム別のセットアップ:
+[Claude Code](integrations/claude-code/README.md) ·
+[Codex](integrations/codex/README.md)。
 
 tool は4つ:
 

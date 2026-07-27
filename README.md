@@ -40,12 +40,23 @@ Register it with any MCP-capable runtime. For Claude Code:
 claude mcp add copresence -- copresence mcp --as claude-1 --dir "$PWD"
 ```
 
-Start a second agent with a different `--as` and they share the session. Omit
-`--as` and one is generated per process — convenient, but a stable id is what
-preserves your read position across restarts.
+For Codex:
 
-> Always give concurrently running agents **different** `--as` values. Sharing
-> one id breaks sharing silently: each filters the other's events out as its own.
+```bash
+codex mcp add copresence -- copresence mcp --runtime codex --dir "$PWD"
+```
+
+Start a second agent and they share the session. Omit `--as` to generate a safe
+id per process, or give each agent a different stable `--as` to preserve its
+read position across restarts.
+
+> Never give concurrently running agents the **same** `--as`. Sharing one id
+> breaks sharing silently: each filters the other's events out as its own.
+> Omitting `--as` is safe because each process generates a different id.
+
+Runtime-specific setup, including the session skill and optional start hook:
+[Claude Code](integrations/claude-code/README.md) ·
+[Codex](integrations/codex/README.md).
 
 Four tools show up:
 
